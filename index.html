@@ -124,6 +124,19 @@
   .legend-dot { width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0; margin-top: 3px; }
   .legend-text { font-size: 12px; color: #9ca3af; flex: 1; line-height: 1.6; }
   .legend-text strong { color: #e2e8f0; display: block; margin-bottom: 2px; }
+  .scan-card { background: rgba(13, 13, 32, 0.96); border: 1px solid #312e81; border-radius: 16px; padding: 14px; margin-bottom: 16px; }
+  .scan-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
+  .scan-btn { flex: 1 1 180px; position: relative; overflow: hidden; }
+  .scan-btn input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+  .scan-status { font-size: 12px; line-height: 1.6; color: #c4b5fd; margin-top: 10px; min-height: 20px; }
+  .scan-preview { display: none; width: 100%; margin-top: 12px; border-radius: 12px; border: 1px solid #3b2a6e; max-height: 220px; object-fit: cover; }
+  .scan-results { display: none; gap: 10px; margin-top: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .scan-results.active { display: grid; }
+  .scan-group { background: #111126; border: 1px solid #1f2147; border-radius: 12px; padding: 10px 12px; }
+  .scan-group strong { display: block; color: #fff; font-size: 13px; margin-bottom: 8px; }
+  .scan-group ul { list-style: none; display: flex; flex-direction: column; gap: 6px; }
+  .scan-group li { font-size: 12px; color: #cbd5e1; line-height: 1.4; }
+  .scan-summary { font-size: 11px; color: #94a3b8; margin-top: 10px; line-height: 1.6; }
   @media (min-width: 700px) {
     body {
       display: flex;
@@ -158,6 +171,8 @@
       flex-shrink: 0;
       padding: 10px 14px;
     }
+    .scan-actions { flex-direction: column; }
+    .scan-results.active { grid-template-columns: 1fr; }
   }
 </style>
 </head>
@@ -182,6 +197,27 @@
         <div class="legend-dot" style="background:#dc2626;margin-top:4px;"></div>
         <div class="legend-text"><strong>Moeilijk — 1 volledig drankje</strong>Sterke wijn of port (&gt;12.5%) — óf 3 shots sterk (&gt;30%)</div>
       </div>
+    </div>
+    <div class="section-label">Drankenkaart scannen</div>
+    <div class="scan-card">
+      <div class="legend-text">
+        <strong>Scan met je camera</strong>
+        Maak een foto van de drankenkaart. De app leest namen en alcoholpercentages en deelt ze automatisch in.
+      </div>
+      <div class="scan-actions">
+        <label class="btn btn-primary scan-btn">
+          Scan met camera
+          <input type="file" id="scan-camera-input" accept="image/*" capture="environment" />
+        </label>
+        <label class="btn scan-btn" style="background:#1a1a2e;color:#fff;border:1px solid #3b2a6e;">
+          Kies foto
+          <input type="file" id="scan-upload-input" accept="image/*" />
+        </label>
+      </div>
+      <div class="scan-status" id="scan-status">Nog geen scan toegevoegd. Tot die tijd gebruikt de app de standaard drankenlijsten.</div>
+      <img class="scan-preview" id="scan-preview" alt="Voorbeeld van gescande drankenkaart" />
+      <div class="scan-results" id="scan-results"></div>
+      <div class="scan-summary" id="scan-summary"></div>
     </div>
     <div class="section-label">Spelers toevoegen (min. 2)</div>
     <div class="add-row">
@@ -252,6 +288,7 @@
   </div>
 </div>
 
+<script src="https://unpkg.com/tesseract.js@5/dist/tesseract.min.js"></script>
 <script>
 // Lichte drankjes = volledig glas/blikje/flesje
 const DRINKS_LIGHT = {
@@ -302,10 +339,20 @@ const SHOTS_PER_DIFF = { 'Makkelijk': 1, 'Gemiddeld': 2, 'Moeilijk': 3 };
 const PTS_PER_DIFF   = { 'Makkelijk': 1, 'Gemiddeld': 2, 'Moeilijk': 3 };
 // 40% kans op sterk bij elk niveau
 const STRONG_CHANCE = 0.4;
+const DIFFS = ['Makkelijk', 'Gemiddeld', 'Moeilijk'];
+const SCAN_KEYWORDS = {
+  'Makkelijk': ['bier', 'pils', 'lager', 'weizen', 'witbier', 'cider', 'radler', 'breezer', 'wkd', 'ice', 'seltzer'],
+  'Gemiddeld': ['wijn', 'rose', 'prosecco', 'cava', 'ipa', 'stout', 'porter', 'desperados', 'gin-tonic', 'gin tonic', 'malibu'],
+  'Moeilijk': ['port', 'sherry', 'vermouth', 'marsala', 'madeira', 'sangria', 'amaretto', 'liqueur', 'likorette', 'dessertwijn'],
+  'Sterk': ['vodka', 'tequila', 'mezcal', 'rum', 'whisky', 'whiskey', 'gin', 'cognac', 'sambuca', 'jager', 'jagermeister', 'schnapps', 'shot']
+};
 
 function pickDrink(diff) {
-  if (Math.random() < STRONG_CHANCE) {
-    const d = DRINKS_STRONG[Math.floor(Math.random() * DRINKS_STRONG.length)];
+  const lightPool = getLightDrinkPool(diff);
+  const strongPool = getStrongDrinkPool();
+  const useStrong = strongPool.length > 0 && Math.random() < STRONG_CHANCE;
+  if (useStrong) {
+    const d = strongPool[Math.floor(Math.random() * strongPool.length)];
     const shots = SHOTS_PER_DIFF[diff];
     const shotWord = shots === 1 ? 'shot' : 'shots';
     return {
@@ -316,8 +363,7 @@ function pickDrink(diff) {
       isStrong: true,
     };
   } else {
-    const list = DRINKS_LIGHT[diff];
-    const d = list[Math.floor(Math.random() * list.length)];
+    const d = lightPool[Math.floor(Math.random() * lightPool.length)];
     return {
       icon: d.icon,
       command: `Drink een volledige ${d.name}`,
@@ -333,6 +379,14 @@ const SEG_COLORS = ['#059669','#d97706','#dc2626','#059669','#d97706','#dc2626']
 
 let players=[], scores={}, round=1, totalRounds=5, turnIndex=0, spinning=false, wheelAngle=0;
 const wheelCanvas = document.getElementById('wheel');
+const customDrinksLight = { Makkelijk: [], Gemiddeld: [], Moeilijk: [] };
+let customStrongDrinks = [];
+let scanInProgress = false;
+const scanStatusEl = document.getElementById('scan-status');
+const scanPreviewEl = document.getElementById('scan-preview');
+const scanResultsEl = document.getElementById('scan-results');
+const scanSummaryEl = document.getElementById('scan-summary');
+const scanInputs = [document.getElementById('scan-camera-input'), document.getElementById('scan-upload-input')];
 
 function addPlayer() {
   const inp = document.getElementById('player-input');
@@ -341,11 +395,178 @@ function addPlayer() {
   players.push(name); inp.value = ''; renderPlayerList();
 }
 document.getElementById('player-input').addEventListener('keydown', e => { if(e.key==='Enter') addPlayer(); });
+scanInputs.forEach(input => input.addEventListener('change', handleScanSelection));
 function removePlayer(i) { players.splice(i,1); renderPlayerList(); }
 function renderPlayerList() {
   document.getElementById('player-list').innerHTML = players.map((p,i) =>
     `<div class="player-tag"><span>${p}</span><button class="remove-btn" onclick="removePlayer(${i})">×</button></div>`
   ).join('');
+}
+
+function getLightDrinkPool(diff) {
+  return customDrinksLight[diff].length ? customDrinksLight[diff] : DRINKS_LIGHT[diff];
+}
+
+function getStrongDrinkPool() {
+  return customStrongDrinks.length ? customStrongDrinks : DRINKS_STRONG;
+}
+
+function setScanStatus(message, isError = false) {
+  scanStatusEl.textContent = message;
+  scanStatusEl.style.color = isError ? '#fca5a5' : '#c4b5fd';
+}
+
+function resetScanPreview(imageUrl = '') {
+  if (!imageUrl) {
+    scanPreviewEl.style.display = 'none';
+    scanPreviewEl.removeAttribute('src');
+    return;
+  }
+  scanPreviewEl.src = imageUrl;
+  scanPreviewEl.style.display = 'block';
+}
+
+function renderScanResults() {
+  const groups = [
+    ['Makkelijk', customDrinksLight.Makkelijk],
+    ['Gemiddeld', customDrinksLight.Gemiddeld],
+    ['Moeilijk', customDrinksLight.Moeilijk],
+    ['Shots', customStrongDrinks]
+  ];
+  const hasResults = groups.some(([, items]) => items.length);
+  scanResultsEl.classList.toggle('active', hasResults);
+  if (!hasResults) {
+    scanResultsEl.innerHTML = '';
+    scanSummaryEl.textContent = '';
+    return;
+  }
+  scanResultsEl.innerHTML = groups.map(([title, items]) => `
+    <div class="scan-group">
+      <strong>${title} (${items.length})</strong>
+      <ul>${items.length ? items.map(item => `<li>${item.name}${item.alc ? ` • ${item.alc}` : ''}</li>`).join('') : '<li>Geen dranken herkend</li>'}</ul>
+    </div>
+  `).join('');
+  scanSummaryEl.textContent = 'Gescande dranken worden direct gebruikt tijdens het draaien van het rad. Lege categorieen vallen automatisch terug op de standaardlijst.';
+}
+
+function createLightDrink(name, alc) {
+  const icon = inferLightIcon(name);
+  const label = alc ? ` (${alc})` : '';
+  return { name, alc: alc || 'Onbekend', icon, detail: `Volledig drankje ${name}${label}` };
+}
+
+function createStrongDrink(name, alc) {
+  return { name, alc: alc || '30%+', icon: '🥃' };
+}
+
+function inferLightIcon(name) {
+  const normalized = normalizeText(name);
+  if (normalized.includes('wijn') || normalized.includes('rose') || normalized.includes('prosecco') || normalized.includes('port') || normalized.includes('sherry')) return '🍷';
+  if (normalized.includes('gin') || normalized.includes('cola') || normalized.includes('tonic') || normalized.includes('breezer') || normalized.includes('wkd') || normalized.includes('ice')) return '🍹';
+  return '🍺';
+}
+
+function normalizeText(value) {
+  return (value || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[|]/g, 'l')
+    .replace(/[^\w\s.%/-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function detectPercentage(text) {
+  const match = text.match(/(\d{1,2}(?:[.,]\d)?)\s*%/);
+  return match ? parseFloat(match[1].replace(',', '.')) : null;
+}
+
+function detectCategory(name, percent) {
+  const normalized = normalizeText(name);
+  if (percent !== null) {
+    if (percent >= 30) return 'Sterk';
+    if (percent >= 12.5) return 'Moeilijk';
+    if (percent >= 8) return 'Gemiddeld';
+    return 'Makkelijk';
+  }
+  for (const keyword of SCAN_KEYWORDS.Sterk) if (normalized.includes(keyword)) return 'Sterk';
+  for (const diff of DIFFS) {
+    for (const keyword of SCAN_KEYWORDS[diff]) {
+      if (normalized.includes(keyword)) return diff;
+    }
+  }
+  return null;
+}
+
+function parseScanText(text) {
+  const nextLight = { Makkelijk: [], Gemiddeld: [], Moeilijk: [] };
+  const nextStrong = [];
+  const seen = new Set();
+  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s{2,}/g, ' ').trim();
+    if (line.length < 3) continue;
+
+    const percent = detectPercentage(line);
+    const cleanedName = line
+      .replace(/(\d{1,2}(?:[.,]\d)?)\s*%/g, '')
+      .replace(/[€$£]\s*\d+(?:[.,]\d{1,2})?/g, '')
+      .replace(/\b\d+(?:[.,]\d{1,2})?\b/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (cleanedName.length < 3) continue;
+
+    const category = detectCategory(cleanedName, percent);
+    if (!category) continue;
+
+    const key = `${category}:${normalizeText(cleanedName)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+
+    if (category === 'Sterk') nextStrong.push(createStrongDrink(cleanedName, percent !== null ? `${percent}%` : '30%+'));
+    else nextLight[category].push(createLightDrink(cleanedName, percent !== null ? `${percent}%` : ''));
+  }
+
+  return { light: nextLight, strong: nextStrong };
+}
+
+async function handleScanSelection(event) {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = '';
+  if (!file || scanInProgress) return;
+
+  scanInProgress = true;
+  resetScanPreview(URL.createObjectURL(file));
+  setScanStatus('Drankenkaart wordt gelezen... dit kan op mobiel even duren.');
+
+  try {
+    if (!window.Tesseract) throw new Error('OCR-bibliotheek niet geladen');
+    const result = await window.Tesseract.recognize(file, 'eng+nld', {
+      logger: ({ status, progress }) => {
+        if (!status) return;
+        const pct = typeof progress === 'number' ? ` (${Math.round(progress * 100)}%)` : '';
+        setScanStatus(`Scan bezig: ${status}${pct}`);
+      }
+    });
+
+    const parsed = parseScanText(result.data.text || '');
+    customDrinksLight.Makkelijk = parsed.light.Makkelijk;
+    customDrinksLight.Gemiddeld = parsed.light.Gemiddeld;
+    customDrinksLight.Moeilijk = parsed.light.Moeilijk;
+    customStrongDrinks = parsed.strong;
+    renderScanResults();
+
+    const totalDetected = DIFFS.reduce((sum, diff) => sum + customDrinksLight[diff].length, 0) + customStrongDrinks.length;
+    if (!totalDetected) setScanStatus('Er zijn geen bruikbare dranken herkend. Probeer een scherpere foto met goed leesbare tekst.', true);
+    else setScanStatus(`Scan gelukt. ${totalDetected} drank${totalDetected === 1 ? '' : 'en'} toegevoegd.`);
+  } catch (error) {
+    console.error(error);
+    setScanStatus('Scannen lukte niet. Controleer je verbinding en probeer een scherpere foto.', true);
+  } finally {
+    scanInProgress = false;
+  }
 }
 
 function startGame() {
