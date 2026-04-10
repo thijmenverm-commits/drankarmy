@@ -340,12 +340,40 @@ const PTS_PER_DIFF   = { 'Makkelijk': 1, 'Gemiddeld': 2, 'Moeilijk': 3 };
 // 40% kans op sterk bij elk niveau
 const STRONG_CHANCE = 0.4;
 const DIFFS = ['Makkelijk', 'Gemiddeld', 'Moeilijk'];
-const SCAN_KEYWORDS = {
-  'Makkelijk': ['bier', 'pils', 'lager', 'weizen', 'witbier', 'cider', 'radler', 'breezer', 'wkd', 'ice', 'seltzer'],
-  'Gemiddeld': ['wijn', 'rose', 'prosecco', 'cava', 'ipa', 'stout', 'porter', 'desperados', 'gin-tonic', 'gin tonic', 'malibu'],
-  'Moeilijk': ['port', 'sherry', 'vermouth', 'marsala', 'madeira', 'sangria', 'amaretto', 'liqueur', 'likorette', 'dessertwijn'],
-  'Sterk': ['vodka', 'tequila', 'mezcal', 'rum', 'whisky', 'whiskey', 'gin', 'cognac', 'sambuca', 'jager', 'jagermeister', 'schnapps', 'shot']
+const DRINK_ALIASES = {
+  'Bier': ['pils', 'lager', 'pint', 'beer'],
+  'Pale Ale': ['apa'],
+  'Cider': ['apple cider'],
+  'Radler sterk': ['radler'],
+  'Bacardi Breezer': ['breezer', 'bacardi'],
+  'WKD Blue': ['wkd'],
+  'Smirnoff Ice': ['smirnoff'],
+  'Hard Seltzer': ['seltzer'],
+  'Wijn (rood/wit)': ['rode wijn', 'rodewijn', 'witte wijn', 'wittewijn', 'wijn'],
+  'Rosé': ['rose'],
+  'Prosecco': ['cava', 'bubbels'],
+  'IPA': ['india pale ale'],
+  'Stout': ['porter'],
+  'Desperados': ['despo'],
+  'Malibu-cola': ['malibu cola', 'malibu coke'],
+  'Gin-tonic': ['gin tonic', 'gintonic'],
+  'Port': ['porto'],
+  'Sherry': ['sherrie'],
+  'Rode wijn sterk': ['zware rode wijn'],
+  'Amaretto-cola': ['amaretto cola', 'amaretto coke'],
+  'Sangria sterk': ['sangria'],
+  'Vodka': ['vodka shot'],
+  'Tequila': ['tequila shot'],
+  'Sambuca': ['sambuca shot'],
+  'Jägermeister': ['jagermeister', 'jager'],
+  'Rum': ['rum shot'],
+  'Whisky': ['whiskey'],
+  'Gin': ['gin shot'],
+  'Cognac': ['brandy'],
+  'Tequila Rose': ['tequila rosé', 'tequila rose shot'],
+  'Peach Schnapps': ['peach', 'schnapps']
 };
+const DRINK_DATABASE = buildDrinkDatabase();
 
 function pickDrink(diff) {
   const lightPool = getLightDrinkPool(diff);
@@ -482,21 +510,103 @@ function detectPercentage(text) {
   return match ? parseFloat(match[1].replace(',', '.')) : null;
 }
 
-function detectCategory(name, percent) {
-  const normalized = normalizeText(name);
-  if (percent !== null) {
-    if (percent >= 30) return 'Sterk';
-    if (percent >= 12.5) return 'Moeilijk';
-    if (percent >= 8) return 'Gemiddeld';
-    return 'Makkelijk';
-  }
-  for (const keyword of SCAN_KEYWORDS.Sterk) if (normalized.includes(keyword)) return 'Sterk';
+function parseAlcoholValue(alc) {
+  return parseFloat(String(alc || '').replace('%', '').replace(',', '.'));
+}
+
+function categorizeAlcoholValue(percent) {
+  if (percent >= 30) return 'Sterk';
+  if (percent >= 12.5) return 'Moeilijk';
+  if (percent >= 8) return 'Gemiddeld';
+  if (percent > 0) return 'Makkelijk';
+  return null;
+}
+
+function buildDrinkDatabase() {
+  const items = [];
   for (const diff of DIFFS) {
-    for (const keyword of SCAN_KEYWORDS[diff]) {
-      if (normalized.includes(keyword)) return diff;
+    for (const drink of DRINKS_LIGHT[diff]) {
+      items.push({
+        ...drink,
+        category: diff,
+        percent: parseAlcoholValue(drink.alc),
+        normalizedName: normalizeText(drink.name),
+        aliases: [drink.name, ...(DRINK_ALIASES[drink.name] || [])].map(normalizeText)
+      });
     }
   }
-  return null;
+  for (const drink of DRINKS_STRONG) {
+    items.push({
+      ...drink,
+      category: 'Sterk',
+      percent: parseAlcoholValue(drink.alc),
+      detail: `${drink.alc} alcohol • shot (>30%)`,
+      normalizedName: normalizeText(drink.name),
+      aliases: [drink.name, ...(DRINK_ALIASES[drink.name] || [])].map(normalizeText)
+    });
+  }
+  return items;
+}
+
+function lineLooksAlcoholic(normalizedLine, percent) {
+  if (percent !== null && percent > 0) return true;
+  return DRINK_DATABASE.some(entry => entry.aliases.some(alias => normalizedLine.includes(alias)));
+}
+
+function scoreDrinkMatch(normalizedLine, percent, entry) {
+  let score = 0;
+  if (normalizedLine.includes(entry.normalizedName)) score += 10;
+
+  for (const alias of entry.aliases) {
+    if (!alias) continue;
+    if (normalizedLine === alias) score += 12;
+    else if (normalizedLine.includes(alias)) score += 8;
+    else {
+      const aliasTokens = alias.split(' ').filter(Boolean);
+      const matchedTokens = aliasTokens.filter(token => normalizedLine.includes(token));
+      score += matchedTokens.length * 2;
+    }
+  }
+
+  if (percent !== null) {
+    const diff = Math.abs(percent - entry.percent);
+    if (diff <= 0.6) score += 8;
+    else if (diff <= 1.5) score += 5;
+    else if (diff <= 3) score += 2;
+    else score -= 6;
+
+    const percentCategory = categorizeAlcoholValue(percent);
+    if (percentCategory !== entry.category) score -= 3;
+  }
+
+  return score;
+}
+
+function matchDrinkFromDatabase(name, percent) {
+  const normalizedLine = normalizeText(name);
+  if (!normalizedLine || !lineLooksAlcoholic(normalizedLine, percent)) return null;
+
+  let bestMatch = null;
+  let bestScore = -Infinity;
+  for (const entry of DRINK_DATABASE) {
+    const score = scoreDrinkMatch(normalizedLine, percent, entry);
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = entry;
+    }
+  }
+
+  return bestScore >= 8 ? bestMatch : null;
+}
+
+function mapDatabaseDrink(entry) {
+  if (entry.category === 'Sterk') return createStrongDrink(entry.name, entry.alc);
+  return {
+    name: entry.name,
+    alc: entry.alc,
+    icon: entry.icon,
+    detail: entry.detail
+  };
 }
 
 function parseScanText(text) {
@@ -518,15 +628,16 @@ function parseScanText(text) {
       .trim();
     if (cleanedName.length < 3) continue;
 
-    const category = detectCategory(cleanedName, percent);
-    if (!category) continue;
+    const match = matchDrinkFromDatabase(cleanedName, percent);
+    if (!match) continue;
 
-    const key = `${category}:${normalizeText(cleanedName)}`;
+    const key = `${match.category}:${match.normalizedName}`;
     if (seen.has(key)) continue;
     seen.add(key);
 
-    if (category === 'Sterk') nextStrong.push(createStrongDrink(cleanedName, percent !== null ? `${percent}%` : '30%+'));
-    else nextLight[category].push(createLightDrink(cleanedName, percent !== null ? `${percent}%` : ''));
+    const canonicalDrink = mapDatabaseDrink(match);
+    if (match.category === 'Sterk') nextStrong.push(canonicalDrink);
+    else nextLight[match.category].push(canonicalDrink);
   }
 
   return { light: nextLight, strong: nextStrong };
